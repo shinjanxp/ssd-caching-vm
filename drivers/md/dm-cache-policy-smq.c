@@ -17,7 +17,7 @@
 #include <linux/math64.h>
 
 #define DM_MSG_PREFIX "cache-policy-smq"
-
+#define CS695_VERSION "CS695_1_6"
 /*----------------------------------------------------------------*/
 
 /*
@@ -34,7 +34,7 @@ static unsigned safe_mod(unsigned n, unsigned d)
 }
 /*CS695*/
 struct vm_info {
-	unsigned long file_inode;
+	unsigned long inode;
 	unsigned long cached_block_count;
 	struct vm_info* next;
 };
@@ -43,7 +43,7 @@ struct vm_info* vm_info_list;
 struct vm_info* lookup_vm_info_by_inode(unsigned long inode){
 	struct vm_info* vm_info_ptr = vm_info_list;
 	while(vm_info_ptr != NULL){
-		if (vm_info_ptr->file_inode == inode){
+		if (vm_info_ptr->inode == inode){
 			return vm_info_ptr;
 		}
 		vm_info_ptr = vm_info_ptr->next;
@@ -65,7 +65,7 @@ struct entry {
 	bool pending_work:1;
 
 	dm_oblock_t oblock;
-	struct vm_info* vm_info_ptr;
+	unsigned long inode;
 };
 
 /*----------------------------------------------------------------*/
@@ -1347,8 +1347,8 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 
 		if (e) {
 			e->oblock = hb;
-			e->vm_info_ptr = vm_info_ptr;
-			printk(KERN_INFO "[CS695.1.4] dm-cache-smq New entry created. e->vm_info->file_inode: %lu", e->vm_info->file_inode);
+			e->inode = vm_info_ptr->inode; 
+			printk(KERN_INFO "[%s] dm-cache-smq New entry created. e->inode: %lu", CS695_VERSION, e->inode);
 			q_push(&mq->hotspot, e);
 			h_insert(&mq->hotspot_table, e);
 		}
@@ -1423,10 +1423,10 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 	
 	/*CS695*/
 	if(inode>0){
-		printk(KERN_INFO "[CS695.1.4] dm-cache-smq inode: %lu", inode);
+		printk(KERN_INFO "[%s] dm-cache-smq inode: %lu", CS695_VERSION, inode);
 		vm_info_ptr = lookup_vm_info_by_inode(inode);
 		if (!vm_info_ptr){
-			printk(KERN_INFO "[CS695.1.4] dm-cache-smq inode %lu not a vm file. Returning to dm-cache-target", inode);
+			printk(KERN_INFO "[%s] dm-cache-smq inode %lu not a vm file. Returning to dm-cache-target", CS695_VERSION, inode);
 			return -ENOENT;
 		}
 	}
@@ -1435,14 +1435,14 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 	e = h_lookup(&mq->table, oblock);
 	if (e) {
 
+		printk(KERN_INFO "[%s] dm-cache-smq entry found. e->inode: %lu",CS695_VERSION, e->inode);
 		stats_level_accessed(&mq->cache_stats, e->level);
-		printk(KERN_INFO "[CS695.1.4] dm-cache-smq entry found. e->vm_info->file_inode: %lu", e->vm_info->file_inode);
-
 		requeue(mq, e);
 		*cblock = infer_cblock(mq, e);
 		return 0;
 
 	} else {
+		printk(KERN_INFO "[%s] dm-cache-smq entry not found.",CS695_VERSION);
 		stats_miss(&mq->cache_stats);
 
 		/*
@@ -1468,7 +1468,7 @@ static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
 	// if(inode>0){
-	// 	printk(KERN_INFO "[CS695.1.4] dm-cache-smq smq_lookup inode : %lu", inode);
+	// 	printk(KERN_INFO "[%s] dm-cache-smq smq_lookup inode : %lu",CS695_VERSION, inode);
 	// }
 	spin_lock_irqsave(&mq->lock, flags);
 	r = __lookup(mq, oblock, cblock,
@@ -1489,7 +1489,7 @@ static int smq_lookup_with_work(struct dm_cache_policy *p,
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
 	// if(inode>0){
-	// 	printk(KERN_INFO "[CS695.1.4] dm-cache-smq smq_lookup_with_work inode : %lu", inode);
+	// 	printk(KERN_INFO "[%s] dm-cache-smq smq_lookup_with_work inode : %lu", CS695_VERSION, inode);
 	// }
 	spin_lock_irqsave(&mq->lock, flags);
 	r = __lookup(mq, oblock, cblock, data_dir, fast_copy, work, &background_queued, inode);
@@ -1692,7 +1692,6 @@ static void smq_tick(struct dm_cache_policy *p, bool can_block)
 	end_hotspot_period(mq);
 	end_cache_period(mq);
 	spin_unlock_irqrestore(&mq->lock, flags);
-	// printk(KERN_INFO "[CS695] Tick tock\n");
 }
 
 static void smq_allow_migrations(struct dm_cache_policy *p, bool allow)
@@ -1957,11 +1956,11 @@ static int __init smq_init(void)
 	/* CS695 */
 	// Create a  dummy vm_info_list with one known file element
 	struct vm_info* vi = kmalloc(sizeof(struct vm_info), GFP_KERNEL);
-	vi->file_inode = 13;
+	vi->inode = 13;
 	vi->cached_block_count = 0;
 	vi->next = NULL;
 	vm_info_list = vi;
-	// printk(KERN_INFO "[CS695] This is init of dm-cache-policy-smq after modules_install\n");
+	printk(KERN_INFO "[%s] This is init of dm-cache-policy-smq after loading modules\n", CS695_VERSION);
 	r = dm_cache_policy_register(&smq_policy_type);
 	if (r) {
 		DMERR("register failed %d", r);
