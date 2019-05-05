@@ -18,7 +18,7 @@ README for CS695
 
 
 # Make and install
-* make drivers/md/dm-cache-smq.ko -j4
+* sudo make drivers/md/dm-cache-smq.ko -j 4
 * sudo rmmod dm-cache-smq && sudo insmod drivers/md/dm-cache-smq.ko 
 
 # Enable and mount

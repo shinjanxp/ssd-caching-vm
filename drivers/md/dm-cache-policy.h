@@ -30,6 +30,7 @@ struct policy_work {
 	enum policy_operation op;
 	dm_oblock_t oblock;
 	dm_cblock_t cblock;
+	unsigned long inode;
 };
 
 /*

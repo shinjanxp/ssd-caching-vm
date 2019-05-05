@@ -8,6 +8,8 @@
 #include "dm-cache-policy-internal.h"
 #include "dm-cache-policy.h"
 #include "dm.h"
+// CS695 Project
+#include <linux/proc_fs.h>
 
 #include <linux/hash.h>
 #include <linux/jiffies.h>
@@ -17,7 +19,7 @@
 #include <linux/math64.h>
 
 #define DM_MSG_PREFIX "cache-policy-smq"
-#define CS695_VERSION "CS695_1_6"
+#define CS695_VERSION "CS695.1.7"
 /*----------------------------------------------------------------*/
 
 /*
@@ -40,7 +42,7 @@ struct vm_info {
 };
 struct vm_info* vm_info_list;
 
-struct vm_info* lookup_vm_info_by_inode(unsigned long inode){
+static struct vm_info* lookup_vm_info_by_inode(unsigned long inode){
 	struct vm_info* vm_info_ptr = vm_info_list;
 	while(vm_info_ptr != NULL){
 		if (vm_info_ptr->inode == inode){
@@ -50,6 +52,7 @@ struct vm_info* lookup_vm_info_by_inode(unsigned long inode){
 	}
 	return NULL;
 }
+
 /* End CS695*/
 
 /*----------------------------------------------------------------*/
@@ -1204,6 +1207,7 @@ static void queue_writeback(struct smq_policy *mq, bool idle)
 
 		work.op = POLICY_WRITEBACK;
 		work.oblock = e->oblock;
+		work.inode = e->inode;
 		work.cblock = infer_cblock(mq, e);
 
 		r = btracker_queue(mq->bg_work, &work, NULL);
@@ -1235,6 +1239,7 @@ static void queue_demotion(struct smq_policy *mq)
 
 	work.op = POLICY_DEMOTE;
 	work.oblock = e->oblock;
+	work.inode = e->inode;
 	work.cblock = infer_cblock(mq, e);
 	r = btracker_queue(mq->bg_work, &work, NULL);
 	if (r) {
@@ -1323,6 +1328,7 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 	struct entry *e = h_lookup(&mq->hotspot_table, hb);
 
 	if (e) {
+		printk(KERN_INFO "[%s] dm-cache-smq h_lookup success. e->inode: %lu", CS695_VERSION, e->inode);
 		stats_level_accessed(&mq->hotspot_stats, e->level);
 
 		hi = get_index(&mq->hotspot_alloc, e);
@@ -1332,6 +1338,8 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 			  NULL, NULL);
 
 	} else {
+		printk(KERN_INFO "[%s] dm-cache-smq h_lookup failed: ", CS695_VERSION);
+		
 		stats_miss(&mq->hotspot_stats);
 
 		e = alloc_entry(&mq->hotspot_alloc);
@@ -1383,34 +1391,122 @@ static void smq_destroy(struct dm_cache_policy *p)
 }
 
 /*----------------------------------------------------------------*/
-/* Inserted by shinjan */
-// static unsigned long get_ino(struct bio *bio) {
-// 	unsigned long inode = 0;
-// 	if(bio && bio->bi_io_vec && bio->bi_io_vec->bv_page)
-// 		if(!((uintptr_t)bio->bi_io_vec->bv_page->mapping & (uintptr_t)1))
-// 			if(bio->bi_io_vec->bv_page->mapping && bio->bi_io_vec->bv_page->mapping->host)
-// 				inode = bio->bi_io_vec->bv_page->mapping->host->i_ino;
+/*----------------------------------------------------------------*/
+// CS695 Project purpose
+// struct vm_info {
+// 	char vm_name[200];
+// 	unsigned long inode;
+// 	unsigned long oblock_count;
+// 	struct vm_info *next;
+// };
 
-// 	return inode;
-// }
+/* lock for procfs write access */
+static DEFINE_MUTEX(write_lock);
+/* lock for procfs read access */
+static DEFINE_MUTEX(read_lock);
 
-// static struct blk_ino_pair *get_bipair_from_oblock(struct smq_policy *mq , dm_oblock_t oblock) {
-// 	//DEFINE_HASHTABLE(block_to_inode, BLOCK_TO_INODE_BITS);
-// 	struct blk_ino_pair *bi_node;
-// 	//hash_for_each_possible(hlist, bi_node, hnode, oblock)
-// 	hash_for_each_possible(mq->block_to_inode, bi_node, node, oblock)
-// 		if(bi_node->block == oblock)
-// 			return bi_node;
+#define ON 1
+#define OFF 0
+int toInteger(char a[]) {
+  size_t c, n;
+ 
+  n = 0;
+  
+//  printk(KERN_INFO"[CS695] %s-- %c, %d", __func__, a[0]);
+  for (c = 0; a[c] != '\0'; c++) {
+    n = n * 10 + a[c] - '0';
+//	printk(KERN_INFO"[CS695] %s--c=%d n=%d, %d", __func__,c, n);
+  }
+  return n;
+}
 
-// 	return NULL;
-// }
-// static inline unsigned long get_ino_from_block(struct smq_policy *mq , dm_oblock_t oblock){
-// 	struct blk_ino_pair *bipair = get_bipair_from_oblock(mq, oblock);
-// 	return bipair==NULL ? 0 : bipair->ino;
-// }
-/* End insertion */
+struct vm_info* traverseList( struct vm_info *temp, int inode){
+	while(temp->next != NULL && temp->inode != inode)
+		temp = temp->next;
+	
+	if (temp->inode == inode)
+		return NULL;
+	return temp;
+} 
+static ssize_t proc_file_track_read(struct file *file, char __user *buf,
+						size_t count, loff_t *ppos)
+{
+	char filename[800] = "";
+
+	copy_from_user(filename, buf, count);
+        filename[count] = '\0';
+	printk(KERN_INFO"[%s] %s, buf=%s", CS695_VERSION, __func__, filename);
+	
+	
+	return 0;
+}
+// struct vm_info *HEAD = NULL;
+
+static size_t print_vm_info_list(size_t i){
+
+	struct vm_info *temp_pointer;
+	if(vm_info_list == NULL){
+
+		printk(KERN_INFO"[%s] %s, vm_info_list==NULL",CS695_VERSION,  __func__ );
+		return -1;
+	}		
+	temp_pointer = vm_info_list;
+	while(temp_pointer != NULL){
+		printk(KERN_INFO"[%s] %s, inode=%lu", CS695_VERSION, __func__, temp_pointer->inode);
+		temp_pointer = temp_pointer->next;
+	}
+	printk(KERN_INFO" ");
+	return 0;
+}
+
+static ssize_t proc_file_track_write(struct file *file, const char __user *buf,
+						size_t count, loff_t *ppos)
+{
+	char filename[800];
+	unsigned long inode_from_user;
+	struct vm_info *current_in_list;
+	struct vm_info *temp_pointer;
+
+	copy_from_user(filename, buf, count);
+	filename[count-1] = '\0';
+	temp_pointer = NULL;
+
+	
+	inode_from_user = toInteger(filename);
+	printk(KERN_INFO "[%s] %s, count=%lu, inode_from_user=%lu, buf=%s, ",CS695_VERSION, __func__,count,inode_from_user,filename);
+
+	if (vm_info_list == NULL){
+		vm_info_list = (struct vm_info *) kmalloc(sizeof(struct vm_info), GFP_KERNEL);
+		vm_info_list->next = NULL;
+		vm_info_list->inode = inode_from_user;		
+	}
+	else {
+		
+		current_in_list = traverseList(vm_info_list, inode_from_user);
+		
+		if(current_in_list == NULL){
+			printk(KERN_INFO "[%s] %s , inode %lu exist in list",CS695_VERSION, __func__, inode_from_user);
+			print_vm_info_list(3);	
+			return count;
+		}
+		temp_pointer = (struct vm_info *) kmalloc(sizeof(struct vm_info), GFP_KERNEL);
+		temp_pointer->next = NULL;
+		current_in_list -> next = temp_pointer;
+		temp_pointer->inode = inode_from_user;
+	}
+	print_vm_info_list(3);
+	return count;
+}
+
+static const struct file_operations fifo_reader_fops = {
+        .owner          = THIS_MODULE,
+        .read           = proc_file_track_read,
+        .write          = proc_file_track_write,
+        .llseek         = noop_llseek,
+};
 
 
+/*^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^*/
 static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblock,
 		    int data_dir, bool fast_copy,
 		    struct policy_work **work, bool *background_work, unsigned long inode)
@@ -1422,14 +1518,17 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 	*background_work = false;
 	
 	/*CS695*/
-	if(inode>0){
-		printk(KERN_INFO "[%s] dm-cache-smq inode: %lu", CS695_VERSION, inode);
-		vm_info_ptr = lookup_vm_info_by_inode(inode);
-		if (!vm_info_ptr){
-			printk(KERN_INFO "[%s] dm-cache-smq inode %lu not a vm file. Returning to dm-cache-target", CS695_VERSION, inode);
-			return -ENOENT;
-		}
+	if (inode==0){
+		return -ENOENT;
 	}
+	
+	// printk(KERN_INFO "[%s] dm-cache-smq inode: %lu", CS695_VERSION, inode);
+	vm_info_ptr = lookup_vm_info_by_inode(inode);
+	if (!vm_info_ptr){
+		printk(KERN_INFO "[%s] dm-cache-smq inode %lu not a vm file. Returning to dm-cache-target", CS695_VERSION, inode);
+		return -ENOENT;
+	}
+
 	/*End CS695*/
 
 	e = h_lookup(&mq->table, oblock);
@@ -1535,6 +1634,7 @@ static void __complete_background_work(struct smq_policy *mq,
 		clear_pending(mq, e);
 		if (success) {
 			e->oblock = work->oblock;
+			e->inode = work->inode;
 			e->level = NR_CACHE_LEVELS - 1;
 			push(mq, e);
 			// h, q, a
@@ -1984,7 +2084,10 @@ static int __init smq_init(void)
 		DMERR("register failed (as default) %d", r);
 		goto out_default;
 	}
-
+	// CS695 project purpose
+	if (proc_create("smqp_file_track_list", 0, NULL, &fifo_reader_fops) == NULL) {
+		return -ENOMEM;
+	}
 	return 0;
 
 out_default:
@@ -2003,6 +2106,7 @@ static void __exit smq_exit(void)
 	dm_cache_policy_unregister(&smq_policy_type);
 	dm_cache_policy_unregister(&mq_policy_type);
 	dm_cache_policy_unregister(&default_policy_type);
+	remove_proc_entry("smqp_file_track_list", NULL);
 }
 
 module_init(smq_init);

@@ -2763,7 +2763,7 @@ static int cache_map(struct dm_target *ti, struct bio *bio)
 	// printk(KERN_INFO "[CS695.1.3] bio->bi_css->cgroup->id: %u", bio->bi_css->cgroup->id);
 	// printk(KERN_INFO "[CS695.1.3] bio->bi_disk->disk_name: %s", bio->bi_disk->disk_name);
 	if(inode>0){
-		printk(KERN_INFO "[CS695.1.4] dm-cache-target inode : %lu", inode);
+		// printk(KERN_INFO "[CS695.1.4] dm-cache-target inode : %lu", inode);
 	}
 	init_per_bio_data(bio);
 	if (unlikely(from_oblock(block) >= from_oblock(cache->origin_blocks))) {
