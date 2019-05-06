@@ -46,6 +46,7 @@ struct vm_info {
 	struct vm_info* next;
 };
 struct vm_info* vm_info_list;
+dm_cblock_t total_cache_size;
 
 static struct vm_info* lookup_vm_info_by_inode(unsigned long inode){
 	struct vm_info* vm_info_ptr = vm_info_list;
@@ -56,6 +57,21 @@ static struct vm_info* lookup_vm_info_by_inode(unsigned long inode){
 		vm_info_ptr = vm_info_ptr->next;
 	}
 	return NULL;
+}
+static struct vm_info* get_max_utilized_vm(struct vm_info* current_vm){
+	struct vm_info* max_utilized_vm = vm_info_list;
+	int vm_utilization = 0;
+	int max_utilization = 0;
+	struct vm_info* vm_info_ptr = vm_info_list;
+	while(vm_info_ptr != NULL){
+		vm_utilization = vm_info_ptr->cached_block_count - vm_info_ptr->caching_limit;
+		if (vm_utilization > max_utilization){
+			max_utilization = vm_utilization;
+			max_utilized_vm = vm_info_ptr;
+		}
+		vm_info_ptr = vm_info_ptr->next;
+	}
+	return max_utilized_vm;
 }
 
 /* End CS695*/
@@ -363,7 +379,8 @@ static struct entry *q_peek(struct queue *q, unsigned max_level, bool can_cross_
 {
 	unsigned level;
 	struct entry *e;
-
+	struct vm_info* max_utilized_vm;
+	struct DataItem* oblock_inode;
 	max_level = min(max_level, q->nr_levels);
 
 	for (level = 0; level < max_level; level++)
@@ -374,7 +391,12 @@ static struct entry *q_peek(struct queue *q, unsigned max_level, bool can_cross_
 				else
 					break;
 			}
-
+			// CS695 check if this entry belongs to max utilized vm
+			max_utilized_vm = get_max_utilized_vm(NULL);
+			oblock_inode = search_hash_array(oblock_inode_hash_map, OBLOCK_INODE_HASH_MAP_SIZE, e->oblock);
+			if(oblock_inode->data != max_utilized_vm->inode){
+				continue;
+			}
 			return e;
 		}
 
@@ -1290,7 +1312,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	oblock_inode = search_hash_array(oblock_inode_hash_map, OBLOCK_INODE_HASH_MAP_SIZE, oblock);
 	vm_info_ptr = lookup_vm_info_by_inode(oblock_inode->data);
 	vm_info_ptr->cached_block_count ++;
-	printk(KERN_INFO "[%s] dm-cache-smq Counter incremented for inode %lu to %lu ",CS695_VERSION, vm_info_ptr->inode, vm_info_ptr->cached_block_count);
+	printk(KERN_INFO "[%s] dm-cache-smq Inode %lu using %lu/%lu ",CS695_VERSION, vm_info_ptr->inode, vm_info_ptr->cached_block_count, vm_info_ptr->caching_limit);
 	// End CS695
 	if (r){
 		free_entry(&mq->cache_alloc, e);
@@ -1431,12 +1453,14 @@ int toInteger(char a[]) {
   return n;
 }
 
-struct vm_info* traverseList( struct vm_info *temp, int inode){
+struct vm_info* traverseList( struct vm_info *temp, int inode, int share){
 	while(temp->next != NULL && temp->inode != inode)
 		temp = temp->next;
 	
-	if (temp->inode == inode)
+	if (temp->inode == inode){
+		temp->caching_limit = share;
 		return NULL;
+	}
 	return temp;
 } 
 static ssize_t proc_file_track_read(struct file *file, char __user *buf,
@@ -1463,11 +1487,45 @@ static size_t print_vm_info_list(size_t i){
 	}		
 	temp_pointer = vm_info_list;
 	while(temp_pointer != NULL){
-		printk(KERN_INFO"[%s] %s, inode=%lu", CS695_VERSION, __func__, temp_pointer->inode);
+		printk(KERN_INFO"[%s] %s, inode=%lu caching_limit=%lu", CS695_VERSION, __func__, temp_pointer->inode, temp_pointer->caching_limit);
 		temp_pointer = temp_pointer->next;
 	}
 	printk(KERN_INFO" ");
 	return 0;
+}
+
+static size_t* my_strtok(char* s)
+{
+	size_t i = 0,j = 0;
+	char *intermediate = (char *) kmalloc(sizeof(char)*20, GFP_KERNEL);
+	size_t *ret = (size_t *) kmalloc(sizeof(size_t)*2, GFP_KERNEL);
+
+	while(s[j] != ','){
+		intermediate[i] = s[j];
+		i++;
+		j++;
+	}
+
+	intermediate[i] = '\0';
+	ret[0] = toInteger(intermediate); 
+//	printk(KERN_INFO"[CS695] %s, %s == %d", __func__,intermediate, ret[0]);
+	//free(intermediate);
+	
+	i = 0;
+	j++;
+	intermediate = (char *) kmalloc(sizeof(char)*20, GFP_KERNEL);
+	while( s[j] != '\0'){
+		intermediate[i] = s[j];
+		i++;
+		j++;
+	}
+
+	intermediate[i] = '\0';
+	ret[1] = toInteger(intermediate); 
+//	printk(KERN_INFO"[CS695] %s, %s == %d", __func__,intermediate, ret[1]);
+	//free(intermediate);
+
+	return ret;
 }
 
 static ssize_t proc_file_track_write(struct file *file, const char __user *buf,
@@ -1477,23 +1535,30 @@ static ssize_t proc_file_track_write(struct file *file, const char __user *buf,
 	unsigned long inode_from_user;
 	struct vm_info *current_in_list;
 	struct vm_info *temp_pointer;
+	size_t share;	
+	size_t *ret;
 
 	copy_from_user(filename, buf, count);
 	filename[count-1] = '\0';
 	temp_pointer = NULL;
 
 	
-	inode_from_user = toInteger(filename);
-	printk(KERN_INFO "[%s] %s, count=%lu, inode_from_user=%lu, buf=%s, ",CS695_VERSION, __func__,count,inode_from_user,filename);
+	// printk(KERN_INFO "[%s] %s, count=%lu, inode_from_user=%lu, buf=%s, ",CS695_VERSION, __func__,count,inode_from_user,filename);
+	ret = my_strtok (filename);
+	printk(KERN_INFO "[CS695] %s, %lu--%lu", __func__,ret[0], ret[1]);
+	inode_from_user = ret[0];	
+	share = ret[1];
+	printk(KERN_INFO "[CS695] cache size %s %lu", __func__,total_cache_size);
 
 	if (vm_info_list == NULL){
 		vm_info_list = (struct vm_info *) kmalloc(sizeof(struct vm_info), GFP_KERNEL);
 		vm_info_list->next = NULL;
 		vm_info_list->inode = inode_from_user;		
+		vm_info_list->caching_limit = share;
 	}
 	else {
 		
-		current_in_list = traverseList(vm_info_list, inode_from_user);
+		current_in_list = traverseList(vm_info_list, inode_from_user, share);
 		
 		if(current_in_list == NULL){
 			printk(KERN_INFO "[%s] %s , inode %lu exist in list",CS695_VERSION, __func__, inode_from_user);
@@ -1556,10 +1621,10 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 		printk(KERN_INFO "[%s] dm-cache-smq entry not found.",CS695_VERSION);
 
 		// check how many blocks are cached for this inode. If limit reached, then return
-		if (vm_info_ptr->cached_block_count >= vm_info_ptr->caching_limit){
-			printk(KERN_INFO "[%s] caching limit reached for %lu.",CS695_VERSION, inode);
-			return -ENOENT;
-		}
+		// if (vm_info_ptr->cached_block_count >= vm_info_ptr->caching_limit){
+		// 	printk(KERN_INFO "[%s] caching limit reached for %lu.",CS695_VERSION, inode);
+		// 	return -ENOENT;
+		// }
 		insert_into_hash_array(oblock_inode_hash_map, OBLOCK_INODE_HASH_MAP_SIZE, oblock, inode);
 
 		stats_miss(&mq->cache_stats);
@@ -1914,6 +1979,7 @@ static struct dm_cache_policy *__smq_create(dm_cblock_t cache_size,
 	init_policy_functions(mq, mimic_mq);
 	mq->cache_size = cache_size;
 	mq->cache_block_size = cache_block_size;
+	total_cache_size = cache_size;
 
 	calc_hotspot_params(origin_size, cache_block_size, from_cblock(cache_size),
 			    &mq->hotspot_block_size, &mq->nr_hotspot_blocks);
