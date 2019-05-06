@@ -1256,6 +1256,8 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	int r;
 	struct entry *e;
 	struct policy_work work;
+	struct vm_info* vm_info_ptr;
+	struct DataItem* oblock_inode;
 
 	if (!mq->migrations_allowed)
 		return;
@@ -1284,9 +1286,18 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	work.oblock = oblock;
 	work.cblock = infer_cblock(mq, e);
 	r = btracker_queue(mq->bg_work, &work, workp);
-	if (r)
+	// CS695 - increment allocated block counter for vm
+	oblock_inode = search_hash_array(oblock_inode_hash_map, OBLOCK_INODE_HASH_MAP_SIZE, oblock);
+	vm_info_ptr = lookup_vm_info_by_inode(oblock_inode->data);
+	vm_info_ptr->cached_block_count ++;
+	printk(KERN_INFO "[%s] dm-cache-smq Counter incremented for inode %lu to %lu ",CS695_VERSION, vm_info_ptr->inode, vm_info_ptr->cached_block_count);
+	// End CS695
+	if (r){
 		free_entry(&mq->cache_alloc, e);
+		vm_info_ptr->cached_block_count ++; // decrement counter if entry was freed
+	}
 }
+
 
 /*----------------------------------------------------------------*/
 
@@ -2058,7 +2069,7 @@ static int __init smq_init(void)
 	/* CS695 */
 
 	struct vm_info* vi = kmalloc(sizeof(struct vm_info), GFP_KERNEL);
-	vi->inode = 13;
+	vi->inode = 12;
 	vi->cached_block_count = 0;
 	vi->caching_limit = 10;
 	vi->next = NULL;
