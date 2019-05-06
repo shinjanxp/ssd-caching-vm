@@ -8,8 +8,6 @@
 #include "dm-cache-policy-internal.h"
 #include "dm-cache-policy.h"
 #include "dm.h"
-// CS695 Project
-#include <linux/proc_fs.h>
 
 #include <linux/hash.h>
 #include <linux/jiffies.h>
@@ -18,8 +16,12 @@
 #include <linux/vmalloc.h>
 #include <linux/math64.h>
 
+// CS695 Project
+#include <linux/proc_fs.h>
+#include "CS695.h"
+#define OBLOCK_INODE_HASH_MAP_SIZE 100000
+
 #define DM_MSG_PREFIX "cache-policy-smq"
-#define CS695_VERSION "CS695.1.7"
 /*----------------------------------------------------------------*/
 
 /*
@@ -35,9 +37,12 @@ static unsigned safe_mod(unsigned n, unsigned d)
 	return d ? n % d : 0u;
 }
 /*CS695*/
+struct DataItem* oblock_inode_hash_map;
+
 struct vm_info {
 	unsigned long inode;
 	unsigned long cached_block_count;
+	unsigned long caching_limit;
 	struct vm_info* next;
 };
 struct vm_info* vm_info_list;
@@ -68,7 +73,6 @@ struct entry {
 	bool pending_work:1;
 
 	dm_oblock_t oblock;
-	unsigned long inode;
 };
 
 /*----------------------------------------------------------------*/
@@ -1207,7 +1211,6 @@ static void queue_writeback(struct smq_policy *mq, bool idle)
 
 		work.op = POLICY_WRITEBACK;
 		work.oblock = e->oblock;
-		work.inode = e->inode;
 		work.cblock = infer_cblock(mq, e);
 
 		r = btracker_queue(mq->bg_work, &work, NULL);
@@ -1239,7 +1242,6 @@ static void queue_demotion(struct smq_policy *mq)
 
 	work.op = POLICY_DEMOTE;
 	work.oblock = e->oblock;
-	work.inode = e->inode;
 	work.cblock = infer_cblock(mq, e);
 	r = btracker_queue(mq->bg_work, &work, NULL);
 	if (r) {
@@ -1328,7 +1330,6 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 	struct entry *e = h_lookup(&mq->hotspot_table, hb);
 
 	if (e) {
-		printk(KERN_INFO "[%s] dm-cache-smq h_lookup success. e->inode: %lu", CS695_VERSION, e->inode);
 		stats_level_accessed(&mq->hotspot_stats, e->level);
 
 		hi = get_index(&mq->hotspot_alloc, e);
@@ -1338,7 +1339,7 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 			  NULL, NULL);
 
 	} else {
-		printk(KERN_INFO "[%s] dm-cache-smq h_lookup failed: ", CS695_VERSION);
+		// printk(KERN_INFO "[%s] dm-cache-smq h_lookup failed: ", CS695_VERSION);
 		
 		stats_miss(&mq->hotspot_stats);
 
@@ -1355,8 +1356,7 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b, 
 
 		if (e) {
 			e->oblock = hb;
-			e->inode = vm_info_ptr->inode; 
-			printk(KERN_INFO "[%s] dm-cache-smq New entry created. e->inode: %lu", CS695_VERSION, e->inode);
+			// printk(KERN_INFO "[%s] dm-cache-smq New entry created. e->oblock: %llu", CS695_VERSION, e->oblock);
 			q_push(&mq->hotspot, e);
 			h_insert(&mq->hotspot_table, e);
 		}
@@ -1528,13 +1528,14 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 		printk(KERN_INFO "[%s] dm-cache-smq inode %lu not a vm file. Returning to dm-cache-target", CS695_VERSION, inode);
 		return -ENOENT;
 	}
+	printk(KERN_INFO "[%s] dm-cache-smq inode %lu oblock %llu", CS695_VERSION, inode, oblock);
 
 	/*End CS695*/
 
 	e = h_lookup(&mq->table, oblock);
 	if (e) {
 
-		printk(KERN_INFO "[%s] dm-cache-smq entry found. e->inode: %lu",CS695_VERSION, e->inode);
+		printk(KERN_INFO "[%s] dm-cache-smq entry found. e->oblock: %llu",CS695_VERSION, e->oblock);
 		stats_level_accessed(&mq->cache_stats, e->level);
 		requeue(mq, e);
 		*cblock = infer_cblock(mq, e);
@@ -1542,6 +1543,14 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 
 	} else {
 		printk(KERN_INFO "[%s] dm-cache-smq entry not found.",CS695_VERSION);
+
+		// check how many blocks are cached for this inode. If limit reached, then return
+		if (vm_info_ptr->cached_block_count >= vm_info_ptr->caching_limit){
+			printk(KERN_INFO "[%s] caching limit reached for %lu.",CS695_VERSION, inode);
+			return -ENOENT;
+		}
+		insert_into_hash_array(oblock_inode_hash_map, OBLOCK_INODE_HASH_MAP_SIZE, oblock, inode);
+
 		stats_miss(&mq->cache_stats);
 
 		/*
@@ -1566,9 +1575,6 @@ static int smq_lookup(struct dm_cache_policy *p, dm_oblock_t oblock, dm_cblock_t
 	int r;
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
-	// if(inode>0){
-	// 	printk(KERN_INFO "[%s] dm-cache-smq smq_lookup inode : %lu",CS695_VERSION, inode);
-	// }
 	spin_lock_irqsave(&mq->lock, flags);
 	r = __lookup(mq, oblock, cblock,
 		     data_dir, fast_copy,
@@ -1587,9 +1593,6 @@ static int smq_lookup_with_work(struct dm_cache_policy *p,
 	bool background_queued;
 	unsigned long flags;
 	struct smq_policy *mq = to_smq_policy(p);
-	// if(inode>0){
-	// 	printk(KERN_INFO "[%s] dm-cache-smq smq_lookup_with_work inode : %lu", CS695_VERSION, inode);
-	// }
 	spin_lock_irqsave(&mq->lock, flags);
 	r = __lookup(mq, oblock, cblock, data_dir, fast_copy, work, &background_queued, inode);
 	spin_unlock_irqrestore(&mq->lock, flags);
@@ -1634,7 +1637,6 @@ static void __complete_background_work(struct smq_policy *mq,
 		clear_pending(mq, e);
 		if (success) {
 			e->oblock = work->oblock;
-			e->inode = work->inode;
 			e->level = NR_CACHE_LEVELS - 1;
 			push(mq, e);
 			// h, q, a
@@ -2054,13 +2056,16 @@ static int __init smq_init(void)
 {
 	int r;
 	/* CS695 */
-	// Create a  dummy vm_info_list with one known file element
+
 	struct vm_info* vi = kmalloc(sizeof(struct vm_info), GFP_KERNEL);
 	vi->inode = 13;
 	vi->cached_block_count = 0;
+	vi->caching_limit = 10;
 	vi->next = NULL;
 	vm_info_list = vi;
 	printk(KERN_INFO "[%s] This is init of dm-cache-policy-smq after loading modules\n", CS695_VERSION);
+	oblock_inode_hash_map  = create_hash_array(OBLOCK_INODE_HASH_MAP_SIZE);
+
 	r = dm_cache_policy_register(&smq_policy_type);
 	if (r) {
 		DMERR("register failed %d", r);

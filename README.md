@@ -12,7 +12,6 @@ README for CS695
 * lvs -a -o +devices
 * mkfs -t ext4 /dev/CS695/lv_origin 
 
-
 # Destroy logical volumes
 * sudo vgremove CS695
 
@@ -29,3 +28,11 @@ README for CS695
 * sudo umount /home/shinjan/cached_disk/
 * sudo vgchange -a n
 
+# File Operations
+* sync; echo 1 > /proc/sys/vm/drop_caches
+* echo "12" > /proc/smqp_file_track_list
+
+This can also be done using the following sh files
+* prepare_lvmcache.sh
+* enable_lvmcache.sh
+* disable_lvmcache.sh
